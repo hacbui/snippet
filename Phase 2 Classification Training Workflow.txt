@@ -240,5 +240,3 @@ Re-label them with LLM
 Merge and retrain
 
 That gets you from 3.3K → 5K+ effective labels with minimal extra cost.
-
-Would you like me to add a small inference script (e.g., predict_reason.py) so process engineers can upload a CSV of summaries and get predicted Level_1 → Level_3 outputs with confidence scores?
