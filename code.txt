@@ -1,3 +1,18 @@
+# === Cell 1: Imports ===
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+from rapidfuzz import fuzz, process
+from fpdf import FPDF
+
+sns.set(style="whitegrid")
+plt.rcParams["figure.figsize"] = (8, 4)
+
+
 from rapidfuzz import fuzz, process
 
 def normalize_label(label, canonical_list):
