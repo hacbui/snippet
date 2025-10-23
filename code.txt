@@ -13,3 +13,56 @@ drift_l2 = 1 - (df["level_2"] == df["level_2_normalized"]).mean()
 drift_l3 = 1 - (df["level_3"] == df["level_3_normalized"]).mean()
 
 print(f"Label Drift → L2: {drift_l2:.1%}, L3: {drift_l3:.1%}")
+
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+pivot = df.groupby(["level_1", "level_2"]).size().unstack(fill_value=0)
+plt.figure(figsize=(10,6))
+sns.heatmap(pivot, cmap="Blues", linewidths=0.5)
+plt.title("Level 1 × Level 2 Coverage")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "taxonomy_heatmap.png")
+plt.show()
+
+
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+
+unknown_lvl3 = df[~df["level_3"].isin(canonical_level3)]["level_3"].dropna().astype(str).unique()
+
+if len(unknown_lvl3) > 5:
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    embeddings = model.encode(unknown_lvl3)
+    n_clusters = min(10, len(unknown_lvl3)//3)
+    km = KMeans(n_clusters=n_clusters, random_state=42)
+    df_clusters = pd.DataFrame({
+        "level_3_label": unknown_lvl3,
+        "cluster": km.fit_predict(embeddings)
+    })
+    display(df_clusters.groupby("cluster")["level_3_label"].apply(list))
+else:
+    print("✅ No emerging Level 3 labels outside canonical taxonomy.")
+
+
+# === Cell: Decision Gate ===
+decision = {
+    "Level 1 Coverage": lvl1_cov >= 1.0,
+    "Level 2 Coverage": lvl2_cov >= 0.6,
+    "Level 3 Coverage": lvl3_cov >= 0.7,
+    "Confidence": df["confidence"].mean() >= 0.75,
+    "Label Drift (L2)": drift_l2 <= 0.05,
+    "Label Drift (L3)": drift_l3 <= 0.05
+}
+
+print("\n=== PHASE 1 QUALITY DECISION ===")
+for k, v in decision.items():
+    print(f"{k:<25} {'✅ PASS' if v else '❌ FAIL'}")
+
+if sum(decision.values()) >= 5:
+    print("\n✅ GO — Proceed to Phase 2 Labeling")
+else:
+    print("\n⚠️ HOLD — Fix prompt or taxonomy before continuing.")
+
+
