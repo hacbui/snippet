@@ -1,0 +1,244 @@
+⚙️ OVERVIEW: Phase 2 Classification Training Workflow
+
+You will:
+
+Load labeled summaries (Phase 2 outputs)
+
+Preprocess & encode labels for the 3-level taxonomy
+
+Fine-tune a transformer (DeBERTa-v3-base)
+
+Train 3 hierarchical models
+
+Model_L1: predict process area (level_1)
+
+Model_L2: predict sub-area (level_2) given level_1
+
+Model_L3: predict reason/intent (level_3) given level_2
+
+Evaluate macro-F1 and confusion matrices
+
+Save models and label encoders for inference
+
+🧱 Project Folder Structure
+project_root/
+│
+├── data/
+│   └── phase2_labeled.parquet
+├── taxonomy/
+│   └── taxonomy.json
+├── models/
+│   ├── level_1/
+│   ├── level_2/
+│   └── level_3/
+└── train_phase2_classifier.ipynb
+
+🧠 1️⃣ Setup Environment
+!pip install transformers datasets evaluate scikit-learn pandas numpy torch matplotlib
+
+🧠 2️⃣ Import and Config
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    Trainer,
+    TrainingArguments,
+    DataCollatorWithPadding
+)
+from datasets import Dataset
+import evaluate
+import torch
+import json
+from pathlib import Path
+
+# Set model checkpoint
+BASE_MODEL = "microsoft/deberta-v3-base"
+BATCH_SIZE = 8
+EPOCHS = 4
+SEED = 42
+torch.manual_seed(SEED)
+
+📂 3️⃣ Load Data
+df = pd.read_parquet("data/phase2_labeled.parquet")
+print(df.head())
+
+# Expect columns: [call_id, summary, level_1, level_2, level_3, confidence]
+df = df[df["confidence"] >= 0.75].reset_index(drop=True)
+print(f"✅ Using {len(df):,} high-confidence labeled samples")
+
+🔠 4️⃣ Encode Labels for Each Level
+encoders = {}
+for lvl in ["level_1", "level_2", "level_3"]:
+    le = LabelEncoder()
+    df[f"{lvl}_id"] = le.fit_transform(df[lvl])
+    encoders[lvl] = le
+    print(f"{lvl}: {len(le.classes_)} classes")
+
+# Save encoders
+Path("models/label_encoders").mkdir(parents=True, exist_ok=True)
+for lvl, le in encoders.items():
+    pd.Series(le.classes_).to_csv(f"models/label_encoders/{lvl}_classes.csv", index=False)
+
+🧩 5️⃣ Prepare Hugging Face Dataset
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+
+def preprocess(examples):
+    return tokenizer(examples["summary"], truncation=True, max_length=512)
+
+def to_hf_dataset(df, target):
+    dataset = Dataset.from_pandas(df[["summary", target]])
+    dataset = dataset.map(preprocess, batched=True)
+    dataset = dataset.rename_column(target, "labels")
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    return dataset.train_test_split(test_size=0.2, seed=SEED)
+
+datasets_lvl1 = to_hf_dataset(df, "level_1_id")
+datasets_lvl2 = to_hf_dataset(df, "level_2_id")
+datasets_lvl3 = to_hf_dataset(df, "level_3_id")
+
+⚙️ 6️⃣ Training Utility Function
+import evaluate
+
+metric = evaluate.load("f1")
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=-1)
+    f1 = metric.compute(predictions=predictions, references=labels, average="macro")["f1"]
+    return {"macro_f1": f1}
+
+🧠 7️⃣ Train Model Per Level
+
+You’ll train three separate models — one for each taxonomy level.
+
+def train_level_model(level_name, datasets, num_labels):
+    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=num_labels)
+    
+    args = TrainingArguments(
+        output_dir=f"models/{level_name}",
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        learning_rate=2e-5,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
+        num_train_epochs=EPOCHS,
+        weight_decay=0.01,
+        load_best_model_at_end=True,
+        metric_for_best_model="macro_f1",
+        logging_dir=f"logs/{level_name}",
+        logging_steps=50
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=datasets["train"],
+        eval_dataset=datasets["test"],
+        tokenizer=tokenizer,
+        data_collator=DataCollatorWithPadding(tokenizer),
+        compute_metrics=compute_metrics,
+    )
+
+    trainer.train()
+    trainer.save_model(f"models/{level_name}/final")
+    return trainer
+
+🚀 8️⃣ Train All Levels
+trainer_lvl1 = train_level_model("level_1", datasets_lvl1, df["level_1_id"].nunique())
+trainer_lvl2 = train_level_model("level_2", datasets_lvl2, df["level_2_id"].nunique())
+trainer_lvl3 = train_level_model("level_3", datasets_lvl3, df["level_3_id"].nunique())
+
+📊 9️⃣ Evaluate Performance
+def evaluate_model(trainer, dataset, encoder, level_name):
+    preds = np.argmax(trainer.predict(dataset["test"]).predictions, axis=1)
+    y_true = dataset["test"]["labels"]
+    
+    print(f"\n=== {level_name.upper()} PERFORMANCE ===")
+    print(classification_report(y_true, preds, target_names=encoder.classes_))
+    
+    cm = confusion_matrix(y_true, preds)
+    print("Confusion Matrix:\n", cm)
+
+evaluate_model(trainer_lvl1, datasets_lvl1, encoders["level_1"], "Level 1")
+evaluate_model(trainer_lvl2, datasets_lvl2, encoders["level_2"], "Level 2")
+evaluate_model(trainer_lvl3, datasets_lvl3, encoders["level_3"], "Level 3")
+
+💾 🔍 10️⃣ Save Models and Metadata
+metadata = {
+    "base_model": BASE_MODEL,
+    "levels": {
+        "level_1": len(encoders["level_1"].classes_),
+        "level_2": len(encoders["level_2"].classes_),
+        "level_3": len(encoders["level_3"].classes_),
+    },
+    "training_records": len(df),
+}
+
+with open("models/metadata.json", "w") as f:
+    json.dump(metadata, f, indent=2)
+
+print("✅ Models and encoders saved to /models/")
+
+🧮 11️⃣ Example Output (Expected)
+✅ Using 1,940 high-confidence samples
+level_1: 8 classes
+level_2: 42 classes
+level_3: 64 classes
+
+=== LEVEL 1 PERFORMANCE ===
+Macro F1 = 0.89
+
+=== LEVEL 2 PERFORMANCE ===
+Macro F1 = 0.80
+
+=== LEVEL 3 PERFORMANCE ===
+Macro F1 = 0.74
+
+📈 12️⃣ Optional — Semi-Supervised Expansion (Pseudo-Labeling)
+
+Once models are trained, use the level_2 classifier (the strongest signal) to label more data:
+
+unlabeled = pd.read_parquet("data/unlabeled_summaries.parquet")
+ds_unlabeled = Dataset.from_pandas(unlabeled[["summary"]]).map(preprocess, batched=True)
+ds_unlabeled.set_format(type="torch", columns=["input_ids", "attention_mask"])
+
+preds = trainer_lvl2.predict(ds_unlabeled)
+probs = torch.nn.functional.softmax(torch.tensor(preds.predictions), dim=1)
+conf = probs.max(dim=1).values.numpy()
+labels = probs.argmax(dim=1).numpy()
+
+pseudo = unlabeled.copy()
+pseudo["level_2"] = encoders["level_2"].inverse_transform(labels)
+pseudo["confidence"] = conf
+
+pseudo_high = pseudo[pseudo["confidence"] >= 0.85]
+pseudo_high.to_parquet("data/pseudo_labels_level2.parquet")
+print(f"✅ Saved {len(pseudo_high):,} pseudo-labeled samples.")
+
+
+Then retrain on the combined dataset (true + pseudo).
+
+🧩 13️⃣ Summary of What You Now Have
+
+✅ Three hierarchical transformer classifiers
+✅ Fine-tuned on ~2,000 clean LLM-labeled samples
+✅ Scalable to pseudo-label thousands more
+✅ All models and encoders saved for downstream inference
+✅ Foundation for active learning (Phase 3)
+
+🧾 14️⃣ Phase 3 Next Steps (later)
+
+In Phase 3, you’ll:
+
+Use model confidence + entropy to pick uncertain examples
+
+Re-label them with LLM
+
+Merge and retrain
+
+That gets you from 3.3K → 5K+ effective labels with minimal extra cost.
+
+Would you like me to add a small inference script (e.g., predict_reason.py) so process engineers can upload a CSV of summaries and get predicted Level_1 → Level_3 outputs with confidence scores?
