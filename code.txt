@@ -81,3 +81,18 @@ else:
     print("\n⚠️ HOLD — Fix prompt or taxonomy before continuing.")
 
 
+# === Cell 8: Root-Cause Clustering ===
+roots = df["root_cause"].dropna().astype(str).tolist()
+model = SentenceTransformer("all-MiniLM-L6-v2")
+embeddings = model.encode(roots, show_progress_bar=False)
+
+k = 10 if len(roots) > 500 else max(2, len(roots)//50)
+kmeans = KMeans(n_clusters=k, random_state=42)
+labels = kmeans.fit_predict(embeddings)
+
+root_df = pd.DataFrame({"root_cause": roots, "cluster": labels})
+root_summary = root_df.groupby("cluster")["root_cause"].apply(lambda x: x.value_counts().head(3))
+root_summary.to_csv(OUTPUT_DIR / "root_cause_clusters.csv")
+root_summary.head(15)
+
+
