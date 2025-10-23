@@ -1,0 +1,15 @@
+from rapidfuzz import fuzz, process
+
+def normalize_label(label, canonical_list):
+    if not label or not isinstance(label, str):
+        return label
+    match, score = process.extractOne(label, canonical_list, scorer=fuzz.token_sort_ratio)
+    return match if score >= 85 else label
+
+df["level_2_normalized"] = df["level_2"].apply(lambda x: normalize_label(x, canonical_level2))
+df["level_3_normalized"] = df["level_3"].apply(lambda x: normalize_label(x, canonical_level3))
+
+drift_l2 = 1 - (df["level_2"] == df["level_2_normalized"]).mean()
+drift_l3 = 1 - (df["level_3"] == df["level_3_normalized"]).mean()
+
+print(f"Label Drift → L2: {drift_l2:.1%}, L3: {drift_l3:.1%}")
