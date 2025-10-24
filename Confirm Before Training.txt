@@ -1,0 +1,4 @@
+print(df["level_1"].nunique(), "L1 classes")
+print(df["level_2"].nunique(), "L2 classes")
+print(df["level_3"].nunique(), "L3 classes")
+assert all(df[lvl].nunique() > 1 for lvl in ["level_1", "level_2"])
