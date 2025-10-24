@@ -1,0 +1,20 @@
+# === Remove or merge classes with too few samples ===
+
+def clean_rare_classes(df, target_col, min_samples=5, merge_other=True):
+    counts = df[target_col].value_counts()
+    rare_classes = counts[counts < min_samples].index
+
+    if merge_other:
+        df[target_col] = df[target_col].apply(lambda x: "Other" if x in rare_classes else x)
+        print(f"✅ Merged {len(rare_classes)} rare {target_col} classes into 'Other'")
+    else:
+        df = df[~df[target_col].isin(rare_classes)]
+        print(f"✅ Dropped {len(rare_classes)} rare {target_col} classes (<{min_samples})")
+
+    print(f"Remaining classes: {df[target_col].nunique()}")
+    return df
+
+# Apply to all levels
+df = clean_rare_classes(df, "level_1", min_samples=3, merge_other=False)
+df = clean_rare_classes(df, "level_2", min_samples=5, merge_other=True)
+df = clean_rare_classes(df, "level_3", min_samples=8, merge_other=True)
