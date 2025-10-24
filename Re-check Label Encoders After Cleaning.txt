@@ -1,0 +1,14 @@
+# Re-check Label Encoders After Cleaning
+
+encoders = {}
+for lvl in ["level_1", "level_2", "level_3"]:
+    le = LabelEncoder()
+    df[f"{lvl}_id"] = le.fit_transform(df[lvl])
+    encoders[lvl] = le
+    print(f"{lvl}: {len(le.classes_)} classes after cleaning")
+
+
+#If any level still prints 1 class only, skip training that level for now:
+if df["level_3"].nunique() < 2:
+    print("⚠️ Skipping Level 3 model training — not enough distinct classes.")
+
