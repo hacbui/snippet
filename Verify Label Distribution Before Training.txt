@@ -1,0 +1,5 @@
+for lvl in ["level_1", "level_2", "level_3"]:
+    counts = df[lvl].value_counts()
+    print(f"\n=== {lvl} distribution ===")
+    print(counts.tail(10))  # see rare categories
+    print(f"Total classes: {len(counts)} | Singleton classes: {(counts == 1).sum()}")
