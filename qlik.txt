@@ -1,8 +1,7 @@
 //---------------------------------------------------
-// STEP 1: LOAD RAW DATA (your joined dataset)
+// STEP 1: LOAD UNPIVOTED EVENT DATA
 //---------------------------------------------------
-
-RawData:
+CustomerEvents:
 LOAD
     contact_id,
     client_id,
@@ -10,62 +9,18 @@ LOAD
     call_date,
     level_1,
     level_2,
-    claims_hub_event_text,
-    claims_hub_event_timestamp,
-    mobile_app_event_text,
-    mobile_app_event_timestamp
-FROM [lib://YourDataFolder/your_file.csv]
+    event_timestamp,
+    event_text,
+    source_channel
+FROM [lib://YourDataFolder/your_unpivoted_file.csv]
 (txt, utf8, embedded labels, delimiter is ',', msq);
 
 //---------------------------------------------------
-// STEP 2: UNPIVOT BOTH EVENT SOURCES INTO ONE FIELD
+// STEP 2: ADD CONTACT CENTER AS FINAL JOURNEY EVENT
 //---------------------------------------------------
 
-FunnelData:
-LOAD
-    contact_id,
-    client_id,
-    claim_id,
-    call_date,
-    level_1,
-    level_2,
-    claims_hub_event_timestamp AS event_timestamp,
-    'Claims Hub' AS source_channel,
-    claims_hub_event_text AS event_text
-RESIDENT RawData
-WHERE Len(Trim(claims_hub_event_text)) > 0;
-
-CONCATENATE (FunnelData)
-LOAD
-    contact_id,
-    client_id,
-    claim_id,
-    call_date,
-    level_1,
-    level_2,
-    mobile_app_event_timestamp AS event_timestamp,
-    'Mobile App' AS source_channel,
-    mobile_app_event_text AS event_text
-RESIDENT RawData
-WHERE Len(Trim(mobile_app_event_text)) > 0;
-
-//---------------------------------------------------
-// STEP 3: CLASSIFY EVENTS INTO FUNNEL STAGES
-//---------------------------------------------------
-
-FunnelStages:
-LOAD *,
-    IF(WildMatch(event_text, '*FAQ*', '*Information*'), 'Stage 1: FAQ Viewed',
-    IF(WildMatch(event_text, '*Set Up Repair*', '*Setup Repair*', '*Start Repair*'), 'Stage 2: Set Up Repair',
-    IF(WildMatch(event_text, '*Select*Shop*', '*Find a Repair*', '*Choose Repair*'), 'Stage 3: Select Shop',
-    'Other'))) AS FunnelStage
-RESIDENT FunnelData;
-
-//---------------------------------------------------
-// STEP 4: ADD CALL STAGE (FINAL ESCALATION)
-//---------------------------------------------------
-
-CONCATENATE (FunnelStages)
+// Create one synthetic “call” event for each contact_id
+CONCATENATE (CustomerEvents)
 LOAD
     contact_id,
     client_id,
@@ -74,30 +29,83 @@ LOAD
     level_1,
     level_2,
     'Contact Center' AS source_channel,
-    'Stage 4: Call' AS FunnelStage
-RESIDENT RawData;
+    'Call: ' & level_2 AS event_text
+RESIDENT CustomerEvents;
 
 //---------------------------------------------------
-// STEP 5: ASSIGN SORT ORDER FOR FUNNEL STAGES
+// STEP 3: CLASSIFY JOURNEY STAGES (MULTI-CHANNEL)
 //---------------------------------------------------
 
-FunnelWithOrder:
+CustomerStages:
 LOAD *,
-    IF(FunnelStage = 'Stage 1: FAQ Viewed', 1,
-    IF(FunnelStage = 'Stage 2: Set Up Repair', 2,
-    IF(FunnelStage = 'Stage 3: Select Shop', 3,
-    IF(FunnelStage = 'Stage 4: Call', 4,
-    5)))) AS FunnelOrder
-RESIDENT FunnelStages;
+    IF(WildMatch(Lower(event_text),
+        '*faq*', '*should i file*', '*information*', '*overview*', '*role type*', '*before i file*', '*after i file*'),
+        'Stage 1: Info / Orientation',
+
+    IF(WildMatch(Lower(event_text),
+        '*document*', '*view document*', '*coverage*', '*liability*', '*status*', '*progress*'),
+        'Stage 2: Claim Information',
+
+    IF(WildMatch(Lower(event_text),
+        '*estimate*', '*upload photo*', '*photo preview*', '*take photo*', '*choose photo*'),
+        'Stage 3: Estimate / Damage Reporting',
+
+    IF(WildMatch(Lower(event_text),
+        '*repair*', '*shop*', '*find repair*', '*change repair*', '*search repair*'),
+        'Stage 4: Arrange Repair',
+
+    IF(WildMatch(Lower(event_text),
+        '*rental*', '*enterprise*'),
+        'Stage 5: Arrange Rental',
+
+    IF(WildMatch(Lower(event_text),
+        '*payment*', '*out-of-pocket*', '*digital payment*', '*confirm contact*', '*opted in*', '*receiving*'),
+        'Stage 6: Payment / Financial',
+
+    IF(WildMatch(Lower(event_text),
+        '*contact*', '*help*', '*need assistance*', '*form submit*', '*send email*'),
+        'Stage 7: Contact / Help',
+
+    IF(WildMatch(Lower(event_text),
+        '*milestone*', '*update*', '*agree*', '*confirm*', '*successful*', '*complete*'),
+        'Stage 8: Completion',
+
+    IF(WildMatch(Lower(event_text),
+        'call:*', '*contact center*'),
+        'Stage 9: Call / Escalation',
+
+    'Stage 0: Other'))))))))) AS journey_stage
+RESIDENT CustomerEvents;
 
 //---------------------------------------------------
-// STEP 6: CLEAN UP TEMP TABLES
+// STEP 4: ADD FUNNEL ORDER AND TIMING METRICS
 //---------------------------------------------------
 
-DROP TABLE RawData;
-DROP TABLE FunnelData;
-DROP TABLE FunnelStages;
+CustomerJourney:
+LOAD *,
+    // Order stages for funnel sorting
+    IF(journey_stage = 'Stage 1: Info / Orientation', 1,
+    IF(journey_stage = 'Stage 2: Claim Information', 2,
+    IF(journey_stage = 'Stage 3: Estimate / Damage Reporting', 3,
+    IF(journey_stage = 'Stage 4: Arrange Repair', 4,
+    IF(journey_stage = 'Stage 5: Arrange Rental', 5,
+    IF(journey_stage = 'Stage 6: Payment / Financial', 6,
+    IF(journey_stage = 'Stage 7: Contact / Help', 7,
+    IF(journey_stage = 'Stage 8: Completion', 8,
+    IF(journey_stage = 'Stage 9: Call / Escalation', 9, 10))))))))) AS FunnelOrder,
+
+    // Hours before call (for timing analysis)
+    (call_date - event_timestamp) * 24 AS Hours_Before_Call,
+
+    // Filter flag for events within 2 days before call
+    IF((call_date - event_timestamp) <= 2, 1, 0) AS Within_2_Days
+RESIDENT CustomerStages;
 
 //---------------------------------------------------
-// ✅ FINAL OUTPUT: FunnelWithOrder
+// STEP 5: CLEAN UP TEMPORARY TABLES
+//---------------------------------------------------
+DROP TABLE CustomerEvents;
+DROP TABLE CustomerStages;
+
+// ✅ FINAL OUTPUT TABLE: CustomerJourney
 //---------------------------------------------------
