@@ -1,0 +1,115 @@
+import pandas as pd
+from datetime import datetime
+
+#---------------------------------------------------
+# STEP 1: LOAD RAW DATA
+#---------------------------------------------------
+df_raw = pd.read_csv("journey_raw.csv", parse_dates=[
+    "call_date", 
+    "claims_hub_event_timestamp", 
+    "mobile_app_event_timestamp"
+])
+
+#---------------------------------------------------
+# STEP 2: UNPIVOT CLAIMS HUB AND MOBILE APP EVENTS
+#---------------------------------------------------
+hub_df = df_raw.loc[df_raw["claims_hub_event_text"].notna(), [
+    "contact_id", "client_id", "claim_id", "call_date",
+    "level_1", "level_2", 
+    "claims_hub_event_text", "claims_hub_event_timestamp"
+]].rename(columns={
+    "claims_hub_event_text": "event_text",
+    "claims_hub_event_timestamp": "event_timestamp"
+})
+hub_df["source_channel"] = "Claims Hub"
+
+app_df = df_raw.loc[df_raw["mobile_app_event_text"].notna(), [
+    "contact_id", "client_id", "claim_id", "call_date",
+    "level_1", "level_2", 
+    "mobile_app_event_text", "mobile_app_event_timestamp"
+]].rename(columns={
+    "mobile_app_event_text": "event_text",
+    "mobile_app_event_timestamp": "event_timestamp"
+})
+app_df["source_channel"] = "Mobile App"
+
+# Combine both sources
+events_df = pd.concat([hub_df, app_df], ignore_index=True)
+
+#---------------------------------------------------
+# STEP 3: ADD CONTACT CENTER CALL AS FINAL EVENT
+#---------------------------------------------------
+calls_df = df_raw[[
+    "contact_id", "client_id", "claim_id", "call_date", "level_1", "level_2"
+]].drop_duplicates()
+calls_df["event_text"] = "Call: " + calls_df["level_2"].astype(str)
+calls_df["event_timestamp"] = calls_df["call_date"]
+calls_df["source_channel"] = "Contact Center"
+
+# Combine digital + call events
+journey_df = pd.concat([events_df, calls_df], ignore_index=True)
+
+#---------------------------------------------------
+# STEP 4: DEFINE JOURNEY STAGE CLASSIFICATION
+#---------------------------------------------------
+def map_stage(text):
+    text = str(text).lower()
+    if any(k in text for k in ["faq", "should i file", "overview", "role type", "before i file", "after i file"]):
+        return "Stage 1: Info / Orientation"
+    elif any(k in text for k in ["document", "coverage", "liability", "status", "progress", "view document"]):
+        return "Stage 2: Claim Information"
+    elif any(k in text for k in ["estimate", "upload photo", "photo preview", "take photo", "choose photo"]):
+        return "Stage 3: Estimate / Damage Reporting"
+    elif any(k in text for k in ["repair", "shop", "find repair", "change repair", "search repair"]):
+        return "Stage 4: Arrange Repair"
+    elif any(k in text for k in ["rental", "enterprise"]):
+        return "Stage 5: Arrange Rental"
+    elif any(k in text for k in ["payment", "out-of-pocket", "digital payment", "confirm contact", "opted in", "receiving"]):
+        return "Stage 6: Payment / Financial"
+    elif any(k in text for k in ["contact", "help", "need assistance", "form submit", "send email"]):
+        return "Stage 7: Contact / Help"
+    elif any(k in text for k in ["milestone", "update", "agree", "confirm", "successful", "complete"]):
+        return "Stage 8: Completion"
+    elif any(k in text for k in ["call:", "contact center"]):
+        return "Stage 9: Call / Escalation"
+    else:
+        return "Stage 0: Other"
+
+journey_df["journey_stage"] = journey_df["event_text"].apply(map_stage)
+
+#---------------------------------------------------
+# STEP 5: ADD FUNNEL ORDER AND TIME METRICS
+#---------------------------------------------------
+stage_order = {
+    "Stage 1: Info / Orientation": 1,
+    "Stage 2: Claim Information": 2,
+    "Stage 3: Estimate / Damage Reporting": 3,
+    "Stage 4: Arrange Repair": 4,
+    "Stage 5: Arrange Rental": 5,
+    "Stage 6: Payment / Financial": 6,
+    "Stage 7: Contact / Help": 7,
+    "Stage 8: Completion": 8,
+    "Stage 9: Call / Escalation": 9
+}
+journey_df["FunnelOrder"] = journey_df["journey_stage"].map(stage_order)
+
+# Hours between event and call
+journey_df["Hours_Before_Call"] = (
+    (journey_df["call_date"] - journey_df["event_timestamp"]).dt.total_seconds() / 3600
+)
+
+# 48-hour filter flag
+journey_df["Within_2_Days"] = (journey_df["Hours_Before_Call"] <= 48).astype(int)
+
+#---------------------------------------------------
+# STEP 6: SORT & CLEAN
+#---------------------------------------------------
+journey_df = journey_df.sort_values(["client_id", "claim_id", "event_timestamp"]).reset_index(drop=True)
+
+# Save clean dataset
+journey_df.to_csv("customer_journey_events.csv", index=False)
+
+print("✅ Transformed dataset saved as 'customer_journey_events.csv'")
+print("Rows:", len(journey_df))
+print("Unique clients:", journey_df['client_id'].nunique())
+journey_df.head(10)
