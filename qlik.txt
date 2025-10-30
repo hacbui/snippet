@@ -1,0 +1,103 @@
+//---------------------------------------------------
+// STEP 1: LOAD RAW DATA (your joined dataset)
+//---------------------------------------------------
+
+RawData:
+LOAD
+    contact_id,
+    client_id,
+    claim_id,
+    call_date,
+    level_1,
+    level_2,
+    claims_hub_event_text,
+    claims_hub_event_timestamp,
+    mobile_app_event_text,
+    mobile_app_event_timestamp
+FROM [lib://YourDataFolder/your_file.csv]
+(txt, utf8, embedded labels, delimiter is ',', msq);
+
+//---------------------------------------------------
+// STEP 2: UNPIVOT BOTH EVENT SOURCES INTO ONE FIELD
+//---------------------------------------------------
+
+FunnelData:
+LOAD
+    contact_id,
+    client_id,
+    claim_id,
+    call_date,
+    level_1,
+    level_2,
+    claims_hub_event_timestamp AS event_timestamp,
+    'Claims Hub' AS source_channel,
+    claims_hub_event_text AS event_text
+RESIDENT RawData
+WHERE Len(Trim(claims_hub_event_text)) > 0;
+
+CONCATENATE (FunnelData)
+LOAD
+    contact_id,
+    client_id,
+    claim_id,
+    call_date,
+    level_1,
+    level_2,
+    mobile_app_event_timestamp AS event_timestamp,
+    'Mobile App' AS source_channel,
+    mobile_app_event_text AS event_text
+RESIDENT RawData
+WHERE Len(Trim(mobile_app_event_text)) > 0;
+
+//---------------------------------------------------
+// STEP 3: CLASSIFY EVENTS INTO FUNNEL STAGES
+//---------------------------------------------------
+
+FunnelStages:
+LOAD *,
+    IF(WildMatch(event_text, '*FAQ*', '*Information*'), 'Stage 1: FAQ Viewed',
+    IF(WildMatch(event_text, '*Set Up Repair*', '*Setup Repair*', '*Start Repair*'), 'Stage 2: Set Up Repair',
+    IF(WildMatch(event_text, '*Select*Shop*', '*Find a Repair*', '*Choose Repair*'), 'Stage 3: Select Shop',
+    'Other'))) AS FunnelStage
+RESIDENT FunnelData;
+
+//---------------------------------------------------
+// STEP 4: ADD CALL STAGE (FINAL ESCALATION)
+//---------------------------------------------------
+
+CONCATENATE (FunnelStages)
+LOAD
+    contact_id,
+    client_id,
+    claim_id,
+    call_date AS event_timestamp,
+    level_1,
+    level_2,
+    'Contact Center' AS source_channel,
+    'Stage 4: Call' AS FunnelStage
+RESIDENT RawData;
+
+//---------------------------------------------------
+// STEP 5: ASSIGN SORT ORDER FOR FUNNEL STAGES
+//---------------------------------------------------
+
+FunnelWithOrder:
+LOAD *,
+    IF(FunnelStage = 'Stage 1: FAQ Viewed', 1,
+    IF(FunnelStage = 'Stage 2: Set Up Repair', 2,
+    IF(FunnelStage = 'Stage 3: Select Shop', 3,
+    IF(FunnelStage = 'Stage 4: Call', 4,
+    5)))) AS FunnelOrder
+RESIDENT FunnelStages;
+
+//---------------------------------------------------
+// STEP 6: CLEAN UP TEMP TABLES
+//---------------------------------------------------
+
+DROP TABLE RawData;
+DROP TABLE FunnelData;
+DROP TABLE FunnelStages;
+
+//---------------------------------------------------
+// ✅ FINAL OUTPUT: FunnelWithOrder
+//---------------------------------------------------
